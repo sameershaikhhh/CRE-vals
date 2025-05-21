@@ -1,0 +1,277 @@
+---
+title: "FSC Follow-ups on Market Size"
+author: "Sameer Shaikh"
+date-modified: today
+format: 
+  html:
+    toc: true
+    toc-location: left
+    fig-width: 8
+    fig-height: 6
+    page-layout: full
+    code-tools: true
+    code-fold: true
+    code-overflow: wrap
+    number-sections: true
+    df-print: paged
+    self-contained: true
+fontsize: "12"
+mainfont: Lato
+editor_options: 
+  chunk_output_type: console
+---
+
+# Background
+
+```{r}
+#| label: load
+#| echo: false
+#| message: false
+options(scipen = 4000)
+
+if(!require("pacman")){install.packages("pacman");library("pacman")}
+pacman::p_load(data.table, ggplot2, tidyverse, knitr, zoo, lubridate, scales, readxl, kableExtra)
+
+cbi_colours = c("#7C477E", "#0B5471", "#0083A0", "#5EC5C2", "#D2E288", "#007DC5", "#F47D20")
+options(scipen = 4000)
+theme_set(theme_bw())
+theme_update(legend.position = "bottom", 
+             legend.text = element_text(size = rel(0.8)), 
+             legend.box.spacing = unit(0, "pt"))
+```
+
+```{r}
+#| echo: false
+#| label: input-data
+#| message: false
+
+valuations <- readRDS("data/fsn/valuations_processed.rds")
+
+
+valuations[segment == "Office", office_location_simple := fcase(
+  RoutingKey %chin% c("D01", "D02", "D04") & County == "DUBLIN", "Office - Dublin CBD",
+  County == "DUBLIN", "Office - Rest of Dublin",
+  LocalAuthority %chin% c("LIMERICK CITY AND COUNTY COUNCIL", "GALWAY CITY COUNCIL", "WATERFORD CITY AND COUNTY COUNCIL"), "Secondary Cities",
+  default = "Ex-Dublin"
+)]
+```
+
+# Part I: Some Aggregated Summaries
+
+```{r}
+#| echo: false
+#| label: cre-summary-broad
+valuations[, 
+           .(Units = .N,
+             IndexedRents = sum(indexed_vals), 
+             CapitalValue = sum(capital_value), 
+             Yield = round(mean(yield), 2)), 
+             keyby = .(segment)][, .(Segment = segment,
+                                     Units,
+                                     `Indexed Rents (€bn)` = sprintf("€%.3fbn", IndexedRents/1e9),
+                                     `Yield (%)` = Yield,
+                                     `Capital Value (€bn)` = sprintf("€%.3fbn", CapitalValue/1e9),
+                                     `% of Total Capital Value` = scales::label_percent(accuracy = 0.1)(CapitalValue/sum(CapitalValue)) )] |> data.table::transpose(make.names =  "Segment", keep.names = "Statistic") |> kable(caption = "Summary Statistics for Commercial Stock, and Broad Segments", align = "ccccc")
+
+
+
+```
+
+```{r}
+#| echo: false
+#| label: cre-summary-cv
+valuations[Subsegment != "All", 
+           .(Units = .N, 
+             NFA = sum(NetFloorArea, na.rm = TRUE), 
+             IndexedRents = sum(indexed_vals), 
+             CapitalValue = sum(capital_value), 
+             Yield = round(mean(yield), 2)), 
+           keyby = .(Subsegment, Location)][, .(Subsegment, 
+                                                Location, 
+                                                Units, 
+                                                `Net Floor Area (sqm)` = label_comma()(NFA), 
+                                                `Indexed Rents (€bn)` = sprintf("€%.3fbn", IndexedRents/1e9), 
+                                                `Yield (%)` = Yield, 
+                                                `Capital Value (€bn)` = sprintf("€%.3fbn", CapitalValue/1e9), 
+                                                `Avg. CV per sqm` = sprintf("€%s", format(CapitalValue/NFA, big.mark = ",", digits = 2)),
+                                                `% of Total Capital Value` = scales::label_percent(accuracy = 0.1)(CapitalValue/sum(CapitalValue)) )] |> kable(caption = "Summary Statistics for Properties, split by Non-Dublin/Dublin, and Subsegments. Excludes Misc.") 
+
+```
+
+```{r}
+#| echo: false
+#| label: summ-2
+
+valuations[Category == "OFFICE", .(Units = .N, 
+                                   NFA = sum(NetFloorArea), 
+                                   IndexedRents = sum(indexed_vals),
+                                   CapitalValue = sum(capital_value), 
+                                   Yield = round(mean(yield), 2)), 
+           keyby = .(Location, office_gen)][, .(Location, 
+                                                `Segment` = office_gen, 
+                                                Units, 
+                                                `Net Floor Area (sqm)` = label_comma()(NFA), 
+                                                `% of Floor Area` = scales::label_percent(accuracy = 0.1)(NFA/sum(NFA)), 
+                                                `Yield (%)` = Yield, 
+                                                 `Capital Value (€bn)` = sprintf("€%.3fbn", CapitalValue/1e9),
+                                                `Avg. CV per sqm` = sprintf("€%s", format(CapitalValue/NFA, big.mark = ",", digits = 2)),
+                                                `% of Office Capital Value` = scales::label_percent(accuracy = 0.1)(CapitalValue/sum(CapitalValue)))] |> data.table::transpose(make.names =  "Location", keep.names = "Statistic") |> kable(caption = "Breakdown of Office by Prime / Non-Prime", align = "lccc")
+```
+
+```{r}
+valuations[segment == "Retail", .(Units = .N, 
+                                   NFA = sum(NetFloorArea), 
+                                   IndexedRents = sum(indexed_vals),
+                                   CapitalValue = sum(capital_value), 
+                                   Yield = round(mean(yield), 2)), 
+           keyby = .(Location, Subsegment)][, .(Location, 
+                                                `Segment` = Subsegment, 
+                                                Units, 
+                                                `Net Floor Area (sqm)` = label_comma()(NFA), 
+                                                `% of Floor Area` = scales::label_percent(accuracy = 0.1)(NFA/sum(NFA)), 
+                                                `Yield (%)` = Yield, 
+                                                 `Capital Value (€bn)` = sprintf("€%.3fbn", CapitalValue/1e9),
+                                                `Avg. CV per sqm` = sprintf("€%s", format(CapitalValue/NFA, big.mark = ",", digits = 2)),
+                                                `% of Retail Capital Value` = scales::label_percent(accuracy = 0.1)(CapitalValue/sum(CapitalValue)))] |> data.table::transpose(make.names =  "Location", keep.names = "Statistic") |> kable(caption = "Breakdown of Retail by Spatial Segments", align = "cccc")
+
+```
+
+
+```{r}
+valuations[Location == "DUBLIN" & segment == "Office", office_location := fcase(
+  RoutingKey == "D01", "Dublin 1",
+  RoutingKey == "D02", "Dublin 2",
+  RoutingKey == "D04", "Dublin 4",
+  default = "Rest of Dublin"
+)]
+
+valuations[Location == "DUBLIN" & segment == "Retail", retail_location := fcase(
+  grepl("D01|D02", RoutingKey), "Dublin 1/2",
+  LocalAuthority == "DUBLIN CITY COUNCIL", "Rest of Dublin City",
+  default = "Rest of Dublin"
+)]
+
+valuations[, Split := fcoalesce(office_location, retail_location, Location)]
+
+valuations[, Split := stringr::str_to_title(Split)]
+
+valuations[, Split := factor(Split, levels = c("Dublin 1", "Dublin 2", "Dublin 4", "Dublin 1/2", "Rest Of Dublin City", "Rest Of Dublin", "Dublin", "National"), ordered = TRUE)] 
+```
+
+# Part II: More Granular Breakdowns
+
+```{r}
+valuations[, .(Units = .N, 
+               CapitalValue = sum(capital_value), 
+               Yield = round(mean(yield), 2)), 
+           keyby = .(segment, Split)][, .(Segment = segment, 
+                                          Location = Split, 
+                                          Units, 
+                                          `Yield (%)` = Yield, 
+                                          `Capital Value (€bn)` = sprintf("€%.3fbn", CapitalValue/1e9), 
+                                          `% of Total Capital Value` = scales::label_percent(accuracy = 0.1)(CapitalValue/sum(CapitalValue)) )] |> kable(caption = "Granular Breakdown, by Region and Segment", align = "llccccccc")
+```
+
+```{r}
+valuations[segment == "Office", .(Units = .N, 
+                                  NFA = sum(NetFloorArea, na.rm = TRUE), 
+                                  CapitalValue = sum(capital_value), 
+                                  Yield = round(mean(yield), 2)), 
+           keyby = .(Split)][, .(Location = Split, 
+                                          Units, 
+                                          `Net Floor Area (sqm)` = label_comma()(NFA), 
+                                          `% of Floor Area` = scales::label_percent(accuracy = 0.1)(NFA/sum(NFA)),
+                                          `Yield (%)` = Yield, 
+                                          `Capital Value (€bn)` = sprintf("€%.3fbn", CapitalValue/1e9), 
+                                          `Avg. CV per sqm.` = sprintf("€%s", format(CapitalValue/NFA, big.mark = ",", digits = 2)),
+             `% of Total Capital Value` = scales::label_percent(accuracy = 0.1)(CapitalValue/sum(CapitalValue)) )] |> data.table::transpose(make.names =  "Location", keep.names = "Statistic") |> kable(caption = "Granular Breakdown, for Office by Location", align = "lcccccccc")
+```
+
+```{r}
+
+valuations[segment == "Office", .(Units = .N, 
+                                  NFA = sum(NetFloorArea, na.rm = TRUE),
+                                  CapitalValue = sum(capital_value),
+                                  Yield = round(mean(yield), 2)), 
+            keyby = .(segment, office_gen, office_location_simple)][, .(Location = office_location_simple, 
+                                                                        Subsegment = office_gen, 
+                                                                        Units, 
+                                                                        `Net Floor Area (sqm)` = label_comma()(NFA), 
+                                                                        `% of Floor Area` = scales::label_percent(accuracy = 0.1)(NFA/sum(NFA)),
+                                                                        `Yield (%)` = Yield, 
+                                                                        `Capital Value €` = CapitalValue,                                                                         `Avg. CV per sqm` = sprintf("€%s", format(CapitalValue/NFA, big.mark = ",", digits = 2)),
+                                                                        `% of Office Capital Value` = (CapitalValue/sum(CapitalValue)) )]
+```
+
+
+
+
+```{r}
+valuations[segment == "Office", .(Units = .N, 
+                                  NFA = sum(NetFloorArea, na.rm = TRUE), 
+                                  CapitalValue = sum(capital_value), 
+                                  Yield = round(mean(yield), 2)), 
+           keyby = .(office_gen)][, .(Segment = office_gen, 
+                                          Units, 
+                                          `Net Floor Area (sqm)` = label_comma()(NFA), 
+                                          `% of Floor Area` = scales::label_percent(accuracy = 0.1)(NFA/sum(NFA)),
+                                          `Yield (%)` = Yield, 
+                                          `Capital Value (€bn)` = sprintf("€%.3fbn", CapitalValue/1e9), 
+                                          `Avg. CV per sqm.` = sprintf("€%s", format(CapitalValue/NFA, big.mark = ",", digits = 2)),
+             `% of Total Capital Value` = scales::label_percent(accuracy = 0.1)(CapitalValue/sum(CapitalValue)) )] |> data.table::transpose(make.names =  "Segment", keep.names = "Statistic") |> kable(caption = "Granular Breakdown, for Office by Prime/Non-Prime", align = "lcccccccc")
+
+```
+
+```{r}
+valuations[segment == "Office", .(Units = .N, 
+                                  NFA = sum(NetFloorArea, na.rm = TRUE), 
+                                  CapitalValue = sum(capital_value), 
+                                  Yield = round(mean(yield), 2)), 
+           keyby = .(segment, office_gen, Split)][, .(Location = Split, 
+                                                      Subsegment = office_gen, 
+                                                      Units, 
+                                                      `Net Floor Area (sqm)` = label_comma()(NFA), 
+                                                      `% of Floor Area` = scales::label_percent(accuracy = 0.1)(NFA/sum(NFA)),
+                                                      `Yield (%)` = Yield, 
+                                                      `Capital Value (€bn)` = sprintf("€%.3fbn", CapitalValue/1e9), 
+                                                      `Avg. CV per sqm` = sprintf("€%s", format(CapitalValue/NFA, big.mark = ",", digits = 2)),
+                                                      `% of Office Capital Value` = (CapitalValue/sum(CapitalValue)) )] |> kable(caption = "Office Cross-tabs: Dublin Postcodes vs. Subsegment", align = "lcccccccc")
+```
+
+```{r}
+valuations[segment == "Retail", .(Units = .N, 
+                                  NFA = sum(NetFloorArea, na.rm = TRUE), 
+                                  CapitalValue = sum(capital_value), 
+                                  Yield = round(mean(yield), 2)), 
+           keyby = .(segment, Split)][, .(Location = Split, 
+                                          Units,
+                                          `Net Floor Area (sqm)` = label_comma()(NFA),
+                                          `% of Floor Area` = scales::label_percent(accuracy = 0.1)(NFA/sum(NFA)),
+                                          `Yield (%)` = Yield,
+                                          `Capital Value (€bn)` = sprintf("€%.3fbn", CapitalValue/1e9),
+                                          `Avg. CV per sqm` = sprintf("€%s", format(CapitalValue/NFA, big.mark = ",", digits = 2)),
+                                          `% of Retail Capital Value` = scales::label_percent(accuracy = 0.1)(CapitalValue/sum(CapitalValue)) )] |> data.table::transpose(make.names =  "Location", keep.names = "Statistic") |> kable(caption = "Retail Segments", align = "lcccccccc")
+
+```
+
+```{r}
+valuations[segment == "Industrial", .(Units = .N, 
+                                  NFA = sum(NetFloorArea, na.rm = TRUE), 
+                                  CapitalValue = sum(capital_value), 
+                                  Yield = round(mean(yield), 2)), 
+           keyby = .(segment, Split)][, .(Location = Split, 
+                                          Units,
+                                          `Net Floor Area (sqm)` = label_comma()(NFA),
+                                          `% of Floor Area` = scales::label_percent(accuracy = 0.1)(NFA/sum(NFA)),
+                                          `Yield (%)` = Yield,
+                                          `Capital Value (€bn)` = sprintf("€%.3fbn", CapitalValue/1e9),
+                                          `Avg. CV per sqm` = sprintf("€%s", format(CapitalValue/NFA, big.mark = ",", digits = 2)),
+                                          `% of Industrial Capital Value` = scales::label_percent(accuracy = 0.1)(CapitalValue/sum(CapitalValue)) )] |> data.table::transpose(make.names =  "Location", keep.names = "Statistic") |> kable(caption = "Industrial - Dublin/Non-Dublin", align = "lcccccccc")
+```
+
+Top 20 in each
+
+```{r}
+valuations[order(segment, Location, -capital_value)][segment == "Industrial", .SD[1:20], by = .(segment, Location)][, .(Location, Uses, Address, County, `Indexed Rents` = sprintf("€%s", format(indexed_vals, big.mark = ",", digits = 2)), `Capital Value` = sprintf("€%s", format(capital_value, big.mark = ",", digits = 2)))] |> kable()
+
+```

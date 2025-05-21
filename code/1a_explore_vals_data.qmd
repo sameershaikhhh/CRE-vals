@@ -1,0 +1,187 @@
+---
+title: "Commercial Property Valuations - Data Summary/Intro"
+author: "Sameer Shaikh"
+format: 
+  html: 
+    toc: true
+    toc-location: left
+    fig-width: 8
+    fig-height: 6
+    page-layout: full
+    code-tools: true
+    code-fold: show
+    code-overflow: wrap
+    number-sections: true
+    df-print: paged
+    self-contained: true
+
+fontsize: "14"
+mainfont: Lato
+editor: visual
+---
+
+```{r}
+#| label: load
+#| echo: false
+#| message: false
+options(scipen = 4000)
+
+if(!require("pacman")){install.packages("pacman");library("pacman")}
+pacman::p_load(data.table, ggplot2, tidyverse, knitr, tmap, sf, scales)
+```
+
+# Background
+
+Since 2017, the CSO, with funding and support from the Central Bank of Ireland and National Asset Management Agency, have attempted to explore the possibility of producing commercial property statistics based on existing sources of administrative data. This is to aid in the effective monitoring of risks, as highlighted by recommendations published in the European Systemic Risk Board on closing real estate data gaps (ESRB/2016/14, and more recently, ESRB/2019/3). This led to a Steering Group report in 2017 on the possibility of creating a Commercial Property Statistical System on commercial property stock, development flows and transaction activity. The main findings concluded that this could not progress unless substantial progress was made to develop and / or enhance administrative data sources that were of sufficient quality to produce officially, contingent on appropriate resources being allocated[^1].
+
+[^1]: [See CSO Steering Group Publication](https://www.cso.ie/en/media/csoie/methods/methodologicalresearch/commercialproperty/CPSS_Steering_Group_Report_Final.pdf).
+
+One recommendation that arose for **stock** of commercial property was to wait for the Valuation Office to complete it's first **property revaluation for the entire country,** which started in 2011 on a phased local-authority basis.
+
+As of February 2024 - the Valuations Office, as part of the *National Revaluation Programme,* has completed this process for every local authority **except Cork County Council** and **Cork City.** They have provided an Open Data API that can be used to collect these valuations. These valuations are separately important for valuation of Commercial Rates at the Local Authority Level.
+
+Let's dive in.
+
+# Available Data Outputs
+
+Link to stakeholder presentation [here](https://tailte.ie/en/valuation/revaluation/reval-23-powerpoint-briefings-to-stakeholders/reval23-presentation-september-2023.pdf).
+
+The API has access to the following fields for 29 Local Authorities (out of 31) at the **Commercial Property Unit** level:
+
+-   County/Local Authority
+-   A Reference Valuation Date
+-   Category
+-   Use within that Category (Shop, Restaurant)
+-   Address Details, with Eircode included.
+-   Area per Floor
+-   Floor Use
+-   Address
+-   The Net Annual Value (Valuation) of the property - based on **Rental Value of the property, not Capital Values**.
+-   No. of Car Park spaces
+-   X ITM and Y ITM coordinates (Aligns with EPSG: 2157)
+-   Valuation Report (Nested data-frame within each row) - which summarises the elements taken into account for valuation for each **floor** of the property
+    -   Floor level
+    -   Area of Floor in m^2^
+    -   Floor Use
+    -   Nav Per m^2^
+    -   NAV for that floor
+
+For Cork City & Cork County Council, the Valuation Report is not available. Additionally, some properties will not have valuation report breakdowns for each separately valued property (i.e. Hotels, Cinemas) for commercial sensitivity reasons.
+
+# Reading in data
+
+```{r}
+valuations <- readRDS("data/cleaned/valuations_data/2024-05-09-ValOff_Valuations.rds")
+```
+
+```{r}
+valuations
+```
+
+# Some Basic Summary Statistics
+
+How many Properties by County?
+
+```{r}
+valuations[, .(Count = .N), keyby = .(County)][, `% of Total` := scales::label_percent(accuracy = 0.01)(Count/sum(Count))][order(-Count)]
+```
+
+Stock of Unit Type
+
+```{r}
+valuations[, .N, keyby = .(Category)][order(-N)]
+```
+
+Note - 'NAs' is entirely Cork/Cork City.
+
+Very important - Number of Local Authorities in reference to it's **reference Valuation Date**
+
+```{r}
+valuations[, .(`No. of Local Authorities` = uniqueN(LocalAuthority)), keyby = .(ValuationDate)]
+```
+
+List:
+
+```{r}
+valuations[, .(`LA` = unique(LocalAuthority)), keyby = .(ValuationDate)]
+```
+
+## Valuations
+
+### Important Note on Valuations
+
+There are two really important points to make on using the valuations.
+
+1.  The estimation of valuation relates to **annual rental value**[^2]of the property that someone could let the property for (and **assumes** that expenses such as insurance, repairs, and taxes are borne by the tenant, not the owner). We will have to convert rental values to capital values (can use Gross Yield rates, by type of property)
+2.  The valuation of **every property** in a Post-Revaluation Local Authority area (everything besides Cork) is with reference to a **specific valuation date.** This also applies to new buildings constructed **after** that valuation date.
+    i.  For our purposes, we will have to adjust up some valuations to current market conditions - **especially for Dublin City Council** properties, which had it's revaluation in 2011. Will provide an example below.
+
+[^2]: See [SCSI Professional Advice on Revaluations](https://scsi.ie/guide-to-professional-advice-on-revaluations-and-general-rates-assessments/).
+
+### Legal Definition of Net Annual Value
+
+The term "net annual value" has a legal definition and is set out in section 48 of the Valuation Act 2001 as "the rent for which, one year with another, the property might, in its actual state, be reasonably expected to let from year to year, on the assumption that the probable average annual cost of repairs, insurance and other expenses (if any) that would be necessary to maintain the property in that state, and all rates and other taxes payable in respect of the property, are borne by the tenant".
+
+-   This makes it sound like the NAV is the **gross** rent receivable for the investor, because it assumes that all of the expenses, taxes, and maintenance cost will be on the tenant.
+
+    -   i.e. - it's just the market rent on it's own if you tried to let it at a specified Valuation Date.
+
+-   Finally - any substantial alterations to an existing building will have a revised valuation by the Valuation Office, but that valuation will be in reference to the same valuation date for the LA.
+
+-   Same for new buildings built after the Valuation Date.
+
+### Basic example: Central Bank Buildings
+
+As an example of a property to look at to discuss the above - the here are the Valuations for the Central Bank NWQ and MS buildings.
+
+The Mayor Street building was an acquisition of 4 & 5 Dublin Landings[^3], hence why the Address will be that:
+
+[^3]: [Central Bank Press Release](https://www.centralbank.ie/news/article/nwq-8-Nov-2018), November 2018.
+
+```{r}
+valuations[Eircode == "D01F7X3",]
+```
+
+Given that it's in the DCC LA, the valuation date is in reference to the **2011 Revaluation.** Even though the buildings were constructed way after 2011 (2017 and 2021/22 respectively, I think?)
+
+Accessing the valuations reports to understand how assessment was made:
+
+```{r}
+pluck(valuations[Eircode == "D01F7X3",], "ValuationReport") |> kable()
+```
+
+Note: Valuations Office has standards for how Floor Area is calculated, **depending** **on the Use of the building**. For Offices, it's net internal area, and excludes any of the office occupied by WCs, stairwells, columns, and disregards non-structural walls.
+
+```{r}
+valuations[Eircode == "D01F7X3", (sum = scales::label_comma()(sum(Valuation)))]
+```
+
+So - the Net Annual Value, or rental value for the two Central Bank Buildings at 10.1 million, reflects the market rent you would get for letting the two buildings out in **April 2011**. The bottom of the commercial property crisis...
+
+## Valuations Statistics
+
+So with all of those caveats in mind, here are some aggregated valuation statistics:
+
+```{r}
+valuations[, scales::label_comma()(sum(Valuation))]
+```
+
+With Reference Valuation Dates, No. of properties, etc.
+
+```{r}
+valuations[, .(`No. of Local Authorities` = uniqueN(LocalAuthority), Properties = .N, NAV = sum(Valuation)), keyby = .(ValuationDate)][, `:=` (`NAV %` = scales::label_percent()(NAV/sum(NAV)), NAV = scales::label_comma()(NAV), `Prop. %` = label_percent()(Properties/sum(Properties)))][,]
+```
+
+So the Cork Valuations are complete **nonsense.** We will probably have to make some estimate of the value of Cork's commercial property market independently.
+
+Additionally: The 19k properties listed in Dublin City Council are at 2011 valuations. We need to correct for that firstly. Then we can decide on everything else.
+
+```{r}
+#| eval: false
+#| echo: false
+
+
+valuations[County == "DUBLIN" & (grepl("Dublin Landings", Address1, ignore.case = TRUE) | grepl("Dublin Landings", Address2, ignore.case = TRUE)),]
+
+pluck(valuations[County == "DUBLIN" & (grepl("Dublin Landings", Address1, ignore.case = TRUE) | grepl("Dublin Landings", Address2, ignore.case = TRUE)),], "ValuationReport")
+```

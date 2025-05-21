@@ -1,0 +1,466 @@
+---
+title: "CRE Stock Valuations Estimates - Draft Methodology"
+author: "Sameer Shaikh"
+date: 2024-04-08
+date-modified: today
+format: 
+  html:
+    toc: true
+    toc-location: left
+    fig-width: 8
+    fig-height: 6
+    page-layout: full
+    code-tools: true
+    code-fold: show
+    code-overflow: wrap
+    number-sections: true
+    df-print: paged
+    self-contained: true
+fontsize: "11"
+mainfont: Lato
+editor: visual
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+#| label: load
+#| echo: false
+#| message: false
+options(scipen = 4000)
+
+if(!require("pacman")){install.packages("pacman");library("pacman")}
+pacman::p_load(data.table, ggplot2, tidyverse, knitr, zoo, lubridate, scales, readxl)
+
+cbi_colours = c("#7C477E", "#0B5471", "#0083A0", "#5EC5C2", "#D2E288", "#007DC5", "#F47D20")
+options(scipen = 4000)
+theme_set(theme_bw())
+theme_update(legend.position = "bottom", 
+             legend.text = element_text(size = rel(0.8)), 
+             legend.box.spacing = unit(0, "pt"))
+```
+
+```{r}
+#| echo: false
+#| label: input-data
+#| message: false
+valuations <- readRDS("data/cleaned/valuations_data/ValOff_Valuations.rds")
+valuations <- valuations[County != "CORK"]
+
+
+msci_cap <- fread("data/cleaned/msci/msci_capital_growth_2023q4.csv")
+msci_rental <- fread("data/cleaned/msci/msci_rental_growth_2023q4.csv")
+msci_equiv_yields <- fread("data/cleaned/msci/msci_equivalent_yields_segmented_2023q4.csv")
+
+msci_rental_seg <- readxl::read_xlsx("data/cleaned/msci/msci_rental_growth_2023q4_subsegmented.xlsx", sheet = 1)
+```
+
+# Background
+
+::: callout-note
+This is an exploratory data file. Do not use as final output. This was done back in April 2024, as some preliminary analysis.
+:::
+
+The purpose of this file is to clearly show how we get from Valuations Office data on rental values on all Irish commercial property stock (with some minor exceptions) to an estimate of the total size of Irish CRE. This file at the moment will NOT have full estimates of **investable** CRE yet (stripping out own-use) - I am going to work on that at a later stage (unclear if possible to do within timeline of FSC) but this is to arrive at a "best-sense" estimate.
+
+To clarify also - this doesn't have a valuation of the **residential** portion of commercial property stock.
+
+# Data Inputs
+
+-   Tailte Éireann Valuation Open Data
+-   MSCI Quarterly Commercial Property Index: Rental Value Growth Index (for cumulative changes in Rental Value to 2023Q4), by type of CRE stock (Office, Retail, Industrial, All)
+-   Some measure of yields of rental value - can source MSCI directly, or some other dataset.
+-   (*Potentially*) For getting the proportion of stock that is **not own-use:** PRSA's Commercial Lease Register.
+
+## Tailte Éireann Valuations Office
+
+Briefly - TÉ provide an API for data on all commercial and industrial property they they have valued as part of the National Revaluation Project. This is done at the Local Authority level, and has been ongoing for 2011. The dataset provides **rental valuations** of every rateable commercial and industrial property in the country, with reference to a specific valuation date within a local authority.
+
+For a wider background on the data - please see my data summary file, `CRE-Valuations-Explore.qmd`, or the stakeholder presentation for the 2023 Revaluation Programme, [at this link](https://tailte.ie/en/valuation/revaluation/reval-23-powerpoint-briefings-to-stakeholders/reval23-presentation-september-2023.pdf).
+
+The valuations reflect the market rental values at that valuation date, so one step will be to index up the rental valuations to the most recently available data.
+
+Additionally - we are going to have to exclude Cork, as this is the only county that has yet to do a revaluation of it's commercial stock to reflect current market values.
+
+```{r}
+#| label: floor-area
+#| echo: false
+valuation_report = data.frame(PropertyNumber = valuations[rep(seq_len(nrow(valuations)), vapply(valuations$ValuationReport, nrow, 0L)),PropertyNumber], data.table::rbindlist(valuations$ValuationReport))
+
+setDT(valuation_report)
+val_areas <- valuation_report[, .(NetFloorArea = sum(Area)), by = .(PropertyNumber)]
+valuations <- merge(valuations, val_areas, all.x = TRUE)
+valuations[is.na(NetFloorArea), NetFloorArea := 0]
+```
+
+```{r}
+#| label: head-vals
+
+head(valuations)
+```
+
+## MSCI Quarterly Property Index Data
+
+Already widely used within MFD to aid analysis in changes in the Capital Values over time, I am going to use **rental value index** to get the cumulative growth in rents from the valuation quarter until the latest available quarterly index data.
+
+## Capitalisation Rates Data
+
+We can use a variety of sources to convert rental to capital values, would involve taking private market data on capitalisation rates on segment **and** location. We want rental values as a % of **market values** of the property, not yields.
+
+However - private market sources will use the term \`investment yields\` (which sound similar to rental values as a % of cost of investment \[incl. borrowing costs\]) but explain movements in the yields as if they are referring to cap rates (market valuations declining due to interest rates, etc.).
+
+For now, I'm using **MSCI Equivalent Yields** data for most , without regard to regional splits **at the minute. We can come back to this**.
+
+The choice to use *Equivalent Yields* comes from their explanation in the methodology documents for the MSCI Quarterly Index[^1]:
+
+[^1]: Available [at the following link](https://www.msci.com/documents/1296102/1311232/MSCI+Property+Indexes+Methodology.pdf/a33f5a6c-a5e4-4d18-f460-d8c537ded968#:~:text=The%20MSCI%20Property%20Indexes%20are,market%20indexes%20and%20sector%20indexes.) - p. 51 with definitions for all other yields.
+
+> Only used in the U.K. and Ireland, the discount rate that equates future income flows to the gross capital value. This is calculated on a quarterly in advance (true equivalent yield) basis. The equivalent yield discounts the current rental value in perpetuity beyond the last review date recorded for the tenancies in the subset.
+
+# Data Preparation
+
+Some columns to add - create yearQtr columns for MSCI indexes and VO data ValuationDates
+
+```{r}
+#| label: rental-conversion
+#| echo: false
+
+setDT(msci_rental_seg)
+msci_rental <- msci_rental[, date := as.Date(date)]
+msci_rental_seg <- msci_rental_seg[, date := as.Date(Period)][order(Segmentation, Segment1, Segment2, date)]
+
+```
+
+```{r}
+#| label: qtr-define
+#| echo: false
+
+msci_cap[, yqtr := zoo::as.yearqtr(date)]
+msci_rental[, yqtr := zoo::as.yearqtr(date)]
+msci_equiv_yields[, yqtr := zoo::as.yearqtr(date)]
+msci_rental_seg[, `:=` (yqtr = zoo::as.yearqtr(date),
+                        Dataset = NULL,
+                        Filter = NULL)]
+
+
+lapply(list(msci_cap, msci_rental, msci_rental_seg, msci_equiv_yields),
+      function(x) {setcolorder(x, c("yqtr"))})
+
+valuations[,val_qtr := zoo::as.yearqtr(ValuationDate)]
+# valuations[, NetFloorArea := purrr::map_dbl(ValuationReport, ~sum(.x$Area))]
+
+setcolorder(valuations, c("val_qtr", "ValuationDate", "Valuation", "LocalAuthority"))
+```
+
+For later - to do a small bit of address cleaning (or really, concatenate the address fields into one, for fuzzy matching later to lease register).
+
+Match your 4 categories: Office, Industrial, Retail, and "All" (generic 'other').
+
+Quick check of counts:
+
+```{r}
+valuations[, .N, Category][order(-N)]
+```
+
+```{r}
+valuations[, segment := fcase(
+  Category %chin% c("RETAIL (SHOPS)", "RETAIL (WAREHOUSE)"), "retail",
+  Category == "OFFICE", "office",
+  Category %chin% c("INDUSTRIAL USES", "MINERALS"), "industrial",
+  default = "all"
+)]
+
+valuations[, .N, keyby = .(segment)]
+```
+
+### Exclusion of Certain Non-CRE property
+
+```{r}
+## Exclusion of certain commercial property ----------------
+valuations <- valuations[ !( !(Category %chin% c("OFFICE", "RETAIL (SHOPS)", "RETAIL (WAREHOUSE)")) & grepl("generating|incinerator|tolls|terminal|airport|\\bport\\b|\\bbus\\b|\\bfuneral\\b|\\bfire\\b \\bstation\\b|\\bantenna|\\bcaravan|\\basylum", Uses, ignore.case = TRUE)),]
+valuations <- valuations[!(Category == "UTILITY" & !grepl("\\bwind\\b", Uses, ignore.case = TRUE)), ]
+valuations <- valuations[!(Category %chin% c("NON-LIST", "CHECK CATEGORY", "NO CATEGORY SELECTED", "MINERALS"))]
+```
+
+## Some charts (prelim)
+
+```{r}
+valuations[Category == "OFFICE", office_gen := 
+             fcase(
+             grepl("4th gen|3rd gen", Uses, ignore.case = TRUE, perl = TRUE), "Prime",
+             default = "Non-Prime" 
+             )]
+
+ggplot2::ggplot(data = valuations[LocalAuthority == "DUBLIN CITY COUNCIL" & Category == "OFFICE" & Valuation < 100000 & NetFloorArea != 0, ], aes(x = Valuation/NetFloorArea)) + geom_density() + facet_wrap(~office_gen) + xlab("Rent per sqm") + ggtitle("Rent per sqm for Office within DCC, 2011 Rents")
+
+```
+
+# Indexing Rental Values
+
+## Method 1: Segmentation without Regional Variation
+
+For the segments you want to index up, you want to get the cumulative growth from the reference valuation quarters to the latest available quarter. I've coded the below to be **dynamic:** if we update the values of the index quarterly (or increase the number of segments for granularity), then the code below should still work without much further fuss. Do provide feedback on better methods, though.
+
+```{r}
+#| label: cgrowth
+
+cols <- grep("date|yqtr", names(msci_rental), value = TRUE, invert = TRUE)
+
+msci_rental[, paste0(cols, "_cuminc") := lapply(.SD, function(segment) {
+ segment[yqtr == data.table::last(yqtr)]/segment
+}), .SDcols = cols]
+
+cols_cuminc <- paste0(cols, "_cuminc")
+
+msci_rental_cuminc <- msci_rental[, !..cols][, !c("date")]
+
+msci_rental_cuminc_multiplier <- melt(msci_rental_cuminc, id.vars = c("yqtr"), variable.name = "segment", value.name = "multiplier")
+
+msci_rental_cuminc_multiplier[, segment := gsub("_cuminc", "", segment)]
+```
+
+So to show the output below: Here's the scalar multipliers that will be used to uprate the values. For a value that was last valued in 1994 Q4 in the "All" segment within the Valuations dataset, you would apply a 2.11x multiplier to get the cumulative increase in the rental value to today.
+
+```{r}
+msci_rental_cuminc_multiplier
+```
+
+```{r}
+valuations <- msci_rental_cuminc_multiplier[valuations, on = c("yqtr" = "val_qtr", "segment")][, indexed_vals := Valuation*multiplier]
+
+setcolorder(valuations, c("yqtr", "LocalAuthority", "segment", "Valuation", "multiplier", "indexed_vals"))
+```
+
+## Summary Statistics on Indexation result
+
+Summary over Valuation LAs
+
+```{r}
+quick_summary <- valuations[, .(`No. of Local Authorities` = uniqueN(LocalAuthority), 
+               Properties = .N, 
+               Rents = sum(Valuation), 
+               IndexedRents = sum(indexed_vals),
+               Uplift = scales::label_percent(accuracy = 0.01)(sum(indexed_vals)/sum(Valuation)-1)), keyby = .(yqtr)]
+
+quick_summary[, `:=` (`Rent %` = scales::label_percent()(Rents/sum(Rents)), `Indexed Rents %` = scales::label_percent()(IndexedRents/sum(IndexedRents)), Rents = scales::label_comma()(Rents), IndexedRents = scales::label_comma()(IndexedRents))][,]
+```
+
+By segment
+
+```{r}
+valuations[, .(Properties = .N, Rents = sum(Valuation), IndexedRents = sum(indexed_vals), Uplift = scales::label_percent(accuracy = 0.01)(sum(indexed_vals)/sum(Valuation)-1) ), keyby = .(segment)][, `:=` (Rents = label_comma()(Rents), IndexedRents = label_comma()(IndexedRents))][,]
+```
+
+## Method 2: Segmentation With Regional Variation
+
+Implemented Regional Splits so far:
+
+-   All (Other): Dublin, Non-Dublin
+
+-   Industrial: Dublin, Non-Dublin
+
+-   Office: Non-Dublin, Central Dublin (DCC), Rest of Dublin (DLRCC, SDCC, Fingal).
+
+-   Retail (Shops Only): Grafton Street / Henry&Mary Street, Other City Centre, Non-Dublin
+
+    -   Note: Would really like Shopping Centre as a separate split, but can't do here. Also, I do not use Retail Warehouse.
+    -   Retail Provincial is also ignored - the price decline is stark?? Need some inputs on this, but for now, might be worth asking.
+        -   Update: ah, it looks like the Retail provincial data only captures about a minimal number of properties - so Dublin dominated...
+
+-   Retail Warehouse is also split out from Retail.
+
+::: callout-important
+I would like to implement further variation by having something **beyond** Non-Dublin, but I need some other data source - I don't think there's any other data source available on evolution of rents.
+:::
+
+Demonstrating variation in decline, by showing cumulative changes by these Subsegments since 2011 Q1 to the latest available quarter.
+
+```{r}
+#| echo: false
+msci_rental_seg[, .SD[c(5, .N)], by = .(Segment1, Segment2)][, change := ((Value[Period == "2023-12-31"]/Value)-1)*100, by = .(Segment1, Segment2)][, .SD[c(1)], .(Segment1, Segment2)][, .(Segment1, Segment2, `Reference Valuation Quarter` = yqtr, `Indexed Value, Latest Quarter` = Value, `% Cumulative Change since Reference Quarter` = round(change, digits = 2))]
+```
+
+Preparing table
+
+```{r}
+msci_rental_seg <- msci_rental_seg[!(Segment1 %chin% c("Retail - Shopping Centre", "Retail - Provincial"))]
+```
+
+```{r}
+#| label: rental-cleans
+msci_rental_seg[, `:=` (Segment_Full = fifelse(!is.na(Segment2), paste(Segment1, Segment2, sep = " - "),
+                                      Segment1),
+                    Location = fcase(
+                      grepl("^All Segment|^Global Property Classification sectors", Segmentation), "NATIONAL",
+                      grepl("^Global Cities|^Sector by Region", Segmentation) & Segment1 != "RETAIL (WAREHOUSE)", "DUBLIN",
+                      Segment1 == "Retail Warehouse", "NATIONAL",
+                      default = NA)
+                   )]
+
+msci_rental_seg[, .N, .(Location, Segment1, Segment2)]
+
+# msci_rental[, .(Segmentation, Segment1, Segment2, Segment_Full)]
+
+# ggplot(data = msci_rental, aes(x = Period, y = Value, colour = Segment_Full)) + geom_line(linewidth = 0.7)
+```
+
+Have the location down - Now, to Subsegments
+
+```{r}
+msci_rental_seg[, Subsegment := fifelse(Location == "NATIONAL", Segment1,
+                                         fifelse(Segment1 == "Dublin", Segment2, Segment1)
+                                         )]
+
+msci_rental_seg[, .N, .(Location, Subsegment, Segment1, Segment2)]
+```
+
+Great! Now to create your cumulative growth to latest period:
+
+```{r}
+msci_rental_seg[, regional_multiplier := Value[Period == "2023-12-31"]/Value, by = .(Location, Subsegment)]
+
+msci_rental_seg <- msci_rental_seg[, .(yqtr, Location, Subsegment, regional_multiplier)]
+
+msci_rental_seg[Subsegment == "Retail Warehouse", Location := "NATIONAL"]
+```
+
+```{r}
+valuations[, Address := do.call(paste, c(lapply(.SD, function(x) {replace(x, is.na(x), "")}), sep=" ")), .SDcols = Address1:Address5]
+
+
+```
+
+Here is the breakdown by Subsegments:
+
+```{r}
+#| echo: false
+valuations[, Location := fifelse(County == "DUBLIN" & Category != "RETAIL (WAREHOUSE)", "DUBLIN", "NATIONAL")]
+
+valuations[, Subsegment := fcase(
+  Location == "NATIONAL" & Category != "RETAIL (WAREHOUSE)", segment,
+  Category == "RETAIL (WAREHOUSE)", "retail warehouse",
+  Location == "DUBLIN" & !(segment %chin% c("office", "retail")), segment,
+  segment == "office", fifelse(LocalAuthority == "DUBLIN CITY COUNCIL", "office - central dublin", "Office - Rest of Dublin"),
+  segment == "retail" & Category != "RETAIL (WAREHOUSE)" & LocalAuthority == "DUBLIN CITY COUNCIL", fifelse(grepl("grafton", Address, perl = TRUE, ignore.case = TRUE), "retail - grafton street",   fifelse(grepl("henry|mary s", Address, perl = TRUE, ignore.case = TRUE), "Retail - Henry/MaryStreet", "retail - other city centre")
+                                                                         ),
+  default = NA
+)]
+
+valuations[is.na(Subsegment), `:=` (Location = "NATIONAL", Subsegment = "retail")]
+
+valuations[!(Subsegment %chin% c("Retail - Henry/MaryStreet", "Office - Rest of Dublin")), Subsegment := stringr::str_to_title(Subsegment)]
+
+valuations[, .(N = .N, `Floor Area` = sum(NetFloorArea)), .(Location, Subsegment, segment)] |> kable(caption = "Breakdown by Subsegments")
+
+```
+
+```{r}
+msci_rental_seg[valuations, on = c("yqtr", "Location", "Subsegment")][, mean(regional_multiplier-multiplier), by = .(yqtr, Location, Subsegment)]
+
+
+```
+
+```{r}
+valuations_segmented <- msci_rental_seg[valuations, on = c("yqtr", "Location", "Subsegment")][, indexed_vals2 := Valuation*regional_multiplier]
+
+valuations_segmented[, .(Properties = .N, Rents = sum(Valuation), IndexedRents = label_comma()(sum(indexed_vals2)), Uplift = scales::label_percent(accuracy = 0.01)(sum(indexed_vals2)/sum(Valuation)-1) ), keyby = .(Subsegment)][, `:=` (Rents = label_comma()(Rents))][,]
+```
+
+```{r}
+valuations[, .SD[which.max(indexed_vals), .(PropertyNumber, Category, County, Uses, Address1, Valuation, indexed_vals, CarPark, AdditionalItems, NetFloorArea)], by = .(Category)]
+```
+
+```{r}
+#| eval: false
+#| echo: false
+pluck(valuations[PropertyNumber == 786926,], "ValuationReport") |> kable()
+```
+
+# Deriving Capital Values through Yield Rates
+
+## Crude 'all CRE yield' estimate
+
+Crude estimate of 6% from Ferg's email showing agg. CRE yield from FSR - not something I would use. It's just the most easy thing to do, but our output is going to be widely sensitive to that one specific parameter. I am not comfortable with that **at all**.
+
+```{r}
+valuations[, .(Rent = scales::label_comma()(sum(indexed_vals)), `Implied Capital Values` = label_comma()(sum(indexed_vals/.06)))] |> kable()
+```
+
+## Segment based estimates
+
+This one just involves:
+
+-   Collecting Private Market data on **capitalisation rates / appropriate yield** measure
+-   Using it to convert rentals to market values
+-   Todo: extend to regional yields.
+    -   Split based on prime and non-prime.
+
+```{r}
+yield_estimates <- melt(msci_equiv_yields[yqtr == data.table::last(yqtr), !c("date")], id.vars = "yqtr", variable.name = "segment", value.name = "yield")[, !c("yqtr")]
+
+yield_estimates |> kable(caption = "Yields used for Segment based Estimate")
+```
+
+```{r}
+valuations <- yield_estimates[valuations, on = "segment"][, capital_value := indexed_vals*(100/yield)]
+
+setcolorder(valuations, c("yqtr", "LocalAuthority", "segment", "Valuation", "multiplier", "indexed_vals", "yield", "capital_value"))
+```
+
+To show what we have so far:
+
+```{r}
+valuations[, c("yqtr", "LocalAuthority", "segment", "Valuation", "multiplier", "indexed_vals", "yield", "capital_value")]
+```
+
+```{r}
+valuations[, .(Rent = scales::label_comma()(sum(indexed_vals)), CapitalValue = label_comma()(sum(capital_value)))]
+```
+
+## Subsegmented Estimates
+
+```{r}
+#| echo: false
+yields_segmented <- readxl::read_xlsx("data/cleaned/cbre_yields/cbre_yields.xlsx")
+
+setDT(yields_segmented)
+yields_segmented |> kable(caption = "Table of Yields used for Subsegment Estimates")
+```
+
+```{r}
+yields_segmented <- yields_segmented[, .(Location, Subsegment, yield)]
+yields_segmented
+```
+
+```{r}
+valuations_segmented <- yields_segmented[valuations_segmented, on = c("Location", "Subsegment")][, `:=` (capital_value1 = indexed_vals*(100/yield), capital_value2 =  indexed_vals2*(100/yield))]
+
+valuations_segmented[, .(Rent = scales::label_comma()(sum(indexed_vals2)), CapitalValue = label_comma()(sum(capital_value1)), CapitalValue2 = label_comma()(sum(capital_value2)))]
+```
+
+Some summary statistics, split by Dublin/Non-Dublin, and Sub-segment
+
+```{r}
+#| echo: false
+#| label: cre-summary-cv
+valuations_segmented[Subsegment != "All", .(Properties = .N, `Net Floor Area` = sum(NetFloorArea, na.rm = TRUE), `Indexed Rents` = sum(indexed_vals2), `Capital Value` = sum(capital_value2), Yield = round(mean(yield), 2)), keyby = .(Subsegment, Location)][, .(Location, Subsegment, Properties, `Net Floor Area` = label_comma()(`Net Floor Area`), `Indexed Rents` = label_comma()(`Indexed Rents`), Yield, `Capital Value` = label_comma()(`Capital Value`), `Avg. CV per m^2` = label_comma()(`Capital Value`/`Net Floor Area`),
+             `% of Total Capital Value` = scales::label_percent(accuracy = 0.01)(`Capital Value`/sum(`Capital Value`)) )] |> kable(caption = "Summary Statistics for Properties, split by Non-Dublin/Dublin, and Subsegments")
+
+```
+
+```{r}
+#| echo: false
+#| label: cre-summary-cv-aggregated
+
+valuations_segmented[, .(Properties = .N, `Net Floor Area` = sum(NetFloorArea), `Indexed Rents` = sum(indexed_vals2), `Capital Value` = sum(capital_value2), Yield = round(mean(yield), 2)), keyby = .(segment, Location)][, .(Location, Segment = segment, Properties, `Net Floor Area` = label_comma()(`Net Floor Area`), `Indexed Rents` = label_comma()(`Indexed Rents`), Yield, `Capital Value` = label_comma()(`Capital Value`), `Avg. CV per m^2` = label_comma()(`Capital Value`/`Net Floor Area`),
+             `% of Total Capital Value` = scales::label_percent(accuracy = 0.1)(`Capital Value`/sum(`Capital Value`)), `% of Total Rental Value (Indexed)` = scales::label_percent(accuracy = 0.1)(`Indexed Rents`/sum(`Indexed Rents`)))] |> kable(caption = "Summary Statistics, Aggregated")
+
+```
+
+```{r}
+valuations_segmented[Category == "OFFICE" & County == "DUBLIN", .(Properties = .N, `Net Floor Area` = sum(NetFloorArea), `Indexed Rents` = sum(indexed_vals2), `Capital Value` = sum(capital_value2), Yield = round(mean(yield), 2)), keyby = .(Location, office_gen)][, .(Location, `Office Gen` = office_gen, Properties, `Net Floor Area` = label_comma()(`Net Floor Area`), `Net Floor %` = round((100*`Net Floor Area`/sum(`Net Floor Area`)), 1), `Indexed Rents` = label_comma()(`Indexed Rents`), Yield, `Capital Value` = label_comma()(`Capital Value`), `Avg. CV per m^2` = label_comma()(`Capital Value`/`Net Floor Area`), `% of Total Capital Value` = scales::label_percent(accuracy = 0.1)(`Capital Value`/sum(`Capital Value`)),  `% of Total Rental Value (Indexed)` = scales::label_percent(accuracy = 0.1)(`Indexed Rents`/sum(`Indexed Rents`)))] |> kable()
+```
+
+::: callout-important
+Beyond the purpose of this exercise being the calculation of total (and down the line, investable) CRE stock, if we want to update the FSN on Commercial Property, I think we should take advantage of the data that VO provide - we have their valuation of rent per m^2^, and a further well defined "Use" field (4th generation Office = Prime Office, etc.) we could take that and replace it with market reported values, etc. There is a **LOT here.**
+:::
