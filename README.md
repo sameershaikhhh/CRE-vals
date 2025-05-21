@@ -1,7 +1,7 @@
 # Outline
 Contains code for downloading, exploring, and working with Tailte Éireann's Valuations Data, from their Open API. 
 
-`0_data_extraction.R` downloads the code directly from TÉ. R scripts starting with `1` are exploratory files, `2` are for files that went into the final Financial Stability Note at the Central Bank of Ireland. 
+`0_data_extraction.R` downloads the code directly from TÉ. R scripts starting with `1` are exploratory files, `2` are for files that went into the final [Financial Stability Note](https://www.centralbank.ie/docs/default-source/publications/financial-stability-notes/estimating-the-total-value-of-irelands-commercial-property-stock.pdf?sfvrsn=602f601a_10) at the Central Bank of Ireland. 
 
 -- Sameer Shaikh, 2024-06-19. 
 
