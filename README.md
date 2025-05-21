@@ -5,5 +5,10 @@ Contains code for downloading, exploring, and working with Tailte Éireann's Val
 
 -- Sameer Shaikh, 2024-06-19. 
 
-P.S. to team: Please learn the awesomeness of Git. It will rock your world.
+P.S.: To learn Git, following resources below might be useful.
 BPLIM has a Git workshop, so does Luis Fonseca, and Bocconi's LEAP Website has several learning resources. 
+
+# Further Notes
+Please note that the repository does not include any data from MSCI, including commercially sourced data from MSCI's Real Capital Analytics, which was used to estimate the market value of professionally-managed investor-owned residential properties in Ireland. 
+
+-- Sameer Shaikh, 2025-05-20
